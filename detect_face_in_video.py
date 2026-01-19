@@ -17,7 +17,8 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
 
         try:
             # Face Recognition Logic
-            face_locations = face_recognition.face_locations(rgb_small_frame)
+            # Upsample 2x to find smaller faces (High Sensitivity)
+            face_locations = face_recognition.face_locations(rgb_small_frame, number_of_times_to_upsample=2)
             face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
             num_faces = len(face_encodings)
             

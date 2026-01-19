@@ -13,9 +13,9 @@ def gaze_worker(frame_queue, result_queue, max_faces):
         output_face_blendshapes=True,
         output_facial_transformation_matrixes=True,
         num_faces=max_faces,
-        min_face_detection_confidence=0.3,
-        min_face_presence_confidence=0.3,
-        min_tracking_confidence=0.3
+        min_face_detection_confidence=0.25,
+        min_face_presence_confidence=0.25,
+        min_tracking_confidence=0.25
     )
     
     landmarker = vision.FaceLandmarker.create_from_options(options)
