@@ -88,6 +88,12 @@ if __name__ == "__main__":
     # It opens the camera locally to test the Class.
     
     detector = FaceDetector()
+    try:
+        from gaze_detector import GazeDetector
+        gaze_detector = GazeDetector()
+    except ImportError:
+        print("Could not import GazeDetector. Make sure mediapipe is installed.")
+        gaze_detector = None
     
     # Simulate Camera Input
     video_path = "video.mp4"
@@ -101,25 +107,35 @@ if __name__ == "__main__":
     
     last_found = False
     last_dist = 1.0
+    last_gaze = "Initializing..."
 
     while True:
         ret, frame = video.read()
         if not ret: break
 
         # === THE API CALL ===
-        result = detector.process_frame(frame) 
+        face_result = detector.process_frame(frame)
+        
+        gaze_result = None
+        if gaze_detector:
+            gaze_result = gaze_detector.process_frame(frame)
         
         # Update State if we got a fresh result
-        found, dist = result
+        found, dist = face_result
         if found is not None:
             last_found = found
             last_dist = dist
             if found:
                 print(f"API Result: Found! ({dist:.2f})")
+        
+        if gaze_result:
+            last_gaze = gaze_result
 
         # Display (Only for testing)
         color = (0, 255, 0) if last_found else (0, 0, 255)
         cv2.putText(frame, f"Found: {last_found} ({last_dist:.2f})", (30,50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        cv2.putText(frame, f"Gaze: {last_gaze}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+        
         cv2.imshow("Frontend Simulation", frame)
         if cv2.waitKey(1) == ord('q'): break
 
@@ -127,5 +143,7 @@ if __name__ == "__main__":
     print(f"Session ended. Total time: {total_time:.2f}s")
 
     detector.close()
+    if gaze_detector:
+        gaze_detector.close()
     video.release()
     cv2.destroyAllWindows()
