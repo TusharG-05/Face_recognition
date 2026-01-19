@@ -2,14 +2,11 @@ import cv2
 import multiprocessing
 import numpy as np
 import mediapipe as mp
-import time
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 def gaze_worker(frame_queue, result_queue, max_faces):
-    from mediapipe.tasks import python
-    from mediapipe.tasks.python import vision
-    import mediapipe as mp
-
-    # Create the options for FaceLandmarker
+    # Initialize MediaPipe FaceLandmarker
     base_options = python.BaseOptions(model_asset_path='face_landmarker.task')
     options = vision.FaceLandmarkerOptions(
         base_options=base_options,
@@ -22,7 +19,7 @@ def gaze_worker(frame_queue, result_queue, max_faces):
     )
     
     landmarker = vision.FaceLandmarker.create_from_options(options)
-
+    
     while True:
         try:
             # Wait for frame
@@ -31,14 +28,15 @@ def gaze_worker(frame_queue, result_queue, max_faces):
             except:
                 continue
             
-            if frame_data is None:
+            if frame_data is None: # Sentinel
                 break
                 
             rgb_frame = frame_data
-            # Convert to MediaPipe Image
+            # Convert to MediaPipe Image format
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             
             try:
+                # Perform Inference
                 results = landmarker.detect(mp_image)
                 
                 status_message = "No Face Detected"
@@ -51,30 +49,30 @@ def gaze_worker(frame_queue, result_queue, max_faces):
                     else:
                         face_landmarks = results.face_landmarks[0]
                         
-                        # Convert normalized landmarks to pixel coordinates
+                        # Convert normalized landmarks [0,1] to pixel coordinates
                         h, w, _ = rgb_frame.shape
                         mesh_points = np.array([[int(l.x * w), int(l.y * h)] for l in face_landmarks])
                         
-                        # --- IRIS RATIO LOGIC ---
-                        # Indices for indices in Face Mesh (Legacy):
-                        # P33 (Left Eye Left), P133 (Left Eye Right), P468 (Left Iris)
-                        # P362 (Right Eye Left), P263 (Right Eye Right), P473 (Right Iris)
+                        # Indices from MediaPipe Face Mesh Canonical Model
+                        # P33: Left Eye Inside, P133: Left Eye Outside, P468: Left Iris Center
+                        # P362: Right Eye Inside, P263: Right Eye Outside, P473: Right Iris Center
                         
                         def get_ratio(p1, p2, iris_center):
+                            """Calculates where the iris is between two eye corners (0.0 to 1.0)"""
                             full_dist = np.linalg.norm(p2 - p1)
                             if full_dist == 0: return 0.5
                             dist_to_p1 = np.linalg.norm(iris_center - p1)
                             return dist_to_p1 / full_dist
 
                         if len(mesh_points) > 473:
-                            # Horizontal
+                            # --- HORIZONTAL GAZE ANALYSIS ---
                             p33, p133, p468 = mesh_points[33], mesh_points[133], mesh_points[468]
                             ratio_left_h = get_ratio(p33, p133, p468)
                             p362, p263, p473 = mesh_points[362], mesh_points[263], mesh_points[473]
                             ratio_right_h = get_ratio(p362, p263, p473)
                             avg_ratio_h = (ratio_left_h + ratio_right_h) / 2
                             
-                            # Vertical
+                            # --- VERTICAL GAZE ANALYSIS ---
                             p159, p145, p468_v = mesh_points[159], mesh_points[145], mesh_points[468]
                             dist_eye_v = np.linalg.norm(p159 - p145)
                             
@@ -83,11 +81,12 @@ def gaze_worker(frame_queue, result_queue, max_faces):
                             ratio_right_v = get_ratio(p386, p374, p473_v)
                             avg_ratio_v = (ratio_left_v + ratio_right_v) / 2
                             
-                            # Thresholds
+                            # --- THRESHOLDS ---
+                            # Tuned for standard webcam distance ~50cm
                             SAFE_H_MIN, SAFE_H_MAX = 0.42, 0.58
-                            SAFE_V_MIN, SAFE_V_MAX = 0.38, 0.62 # Narrowed but we will ignore blinks
+                            SAFE_V_MIN, SAFE_V_MAX = 0.38, 0.62 
                             
-                            is_blinking = dist_eye_v < (h * 0.012) # Empirical threshold for closed eye
+                            is_blinking = dist_eye_v < (h * 0.012) # Blinking threshold
 
                             if avg_ratio_h < SAFE_H_MIN:
                                 status_message = "WARNING: Looking Away (Right)"
@@ -104,7 +103,7 @@ def gaze_worker(frame_queue, result_queue, max_faces):
                         else:
                             status_message = "Face Mesh Limited"
 
-                # ALWAYS put result to clear the "Initializing" state
+                # Helper: Clear queue if full to always provide latest status
                 if result_queue.full():
                     try:
                         result_queue.get_nowait()
@@ -113,13 +112,16 @@ def gaze_worker(frame_queue, result_queue, max_faces):
                 result_queue.put(status_message)
 
             except Exception as e:
-                print(f"Gaze Processing Error: {e}")
+                print(f"Gaze Worker Error: {e}")
                 
         except Exception as e:
             print(f"Gaze Worker Error: {e}")
 
     landmarker.close()
 
+# =============================================================================
+# BACKEND API: GazeDetector Class
+# =============================================================================
 class GazeDetector:
     def __init__(self, max_faces=1):
         print("Initializing GazeDetector...")
@@ -135,7 +137,7 @@ class GazeDetector:
         print("Gaze Worker started.")
         
     def process_frame(self, frame_bgr):
-        # MediaPipe expects RGB
+            # MediaPipe expects RGB
         try:
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             frame_rgb.flags.writeable = False
@@ -148,9 +150,9 @@ class GazeDetector:
             try:
                 return self.result_queue.get_nowait()
             except:
-                return None # Return None if no NEW result, main loop keeps old one
+                return None # Return None if no NEW result available
         except Exception as e:
-            print(f"Gaze Main Error: {e}")
+            print(f"Gaze API Error: {e}")
             return None
             
     def close(self):
