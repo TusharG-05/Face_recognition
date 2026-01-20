@@ -24,19 +24,30 @@ def face_recognition_worker(frame_queue: multiprocessing.Queue, result_queue: mu
             # Convert to RGB inside the worker process
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             
-            # Scale frame for speed (720p is the sweet spot for HOG distance detection)
+            # Scale frame for speed
             h, w = frame_rgb.shape[:2]
-            s = 720 / h if h > 720 else 1.0
-            img = cv2.resize(frame_rgb, (0,0), fx=s, fy=s) if s < 1.0 else frame_rgb
-
-            # Detect with upsample=1 (Faster than level 2, but 720p provides enough detail)
-            locs = face_recognition.face_locations(img, model="hog", number_of_times_to_upsample=1)
-            encs = face_recognition.face_encodings(img, locs)
+            target_h = 540
+            s = target_h / h if h > target_h else 1.0
             
+            # Resize if needed
+            img = cv2.resize(frame_rgb, (0,0), fx=s, fy=s) if s < 1.0 else frame_rgb
+            
+            t0 = time.time()
+            locs = face_recognition.face_locations(img, model="hog", number_of_times_to_upsample=0)
+            
+            # Only encode if we actually found a face
+            if locs:
+                encs = face_recognition.face_encodings(img, locs)
+            else:
+                encs = []
+                
+            dt = time.time() - t0
+            # print(f"Face Process Time: {dt*1000:.1f}ms | Scale: {s:.2f} | Faces: {len(locs)}") # Debug log
+
             match, conf = False, 1.0
             if encs and known_encoding is not None:
                 dists = face_recognition.face_distance(encs, known_encoding)
-                match = any(d <= 0.5 for d in dists)
+                match = any(d <= 0.52 for d in dists) 
                 conf = min(dists)
             
             # Map back coordinates accurately
