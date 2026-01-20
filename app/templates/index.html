@@ -13,54 +13,119 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
+            /* Align top instead of center */
             height: 100vh;
             margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
         }
 
         h1 {
             border-bottom: 2px solid #00ffcc;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
+            padding-bottom: 5px;
+            margin-bottom: 15px;
+            margin-top: 0;
+            font-size: 1.5rem;
+            /* Smaller header */
         }
 
         .video-container {
-            border: 5px solid #333;
-            border-radius: 10px;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            border: 3px solid #333;
+            border-radius: 8px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
             overflow: hidden;
+            width: 100%;
+            max-width: 100%;
+            /* Allow full width */
+            flex-grow: 1;
+            /* Take up available space */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
         }
 
-        img {
-            display: block;
-            background-color: #000;
+        /* Ensure video fits within the container without cropping or overflowing */
+        .video-container img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            /* Crucial: Ensures full video is visible */
+            width: auto;
+            height: auto;
         }
 
-        .status {
-            margin-top: 20px;
-            color: #aaa;
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            background: #2a2a2a;
+            padding: 10px 20px;
+            border-radius: 50px;
+        }
+
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            background-color: #00ffcc;
+            color: #000;
         }
     </style>
 </head>
 
 <body>
     <h1>Face & Gaze Security Monitor</h1>
+
     <div class="video-container">
-        <img src="/video_feed" width="640" height="480" alt="Video Feed">
+        <img src="/video_feed" alt="Video Feed">
     </div>
 
-    <div class="controls" style="margin-top: 20px; text-align: center;">
-        <h3>Update Authorized Person</h3>
-        <input type="file" id="fileInput" accept="image/*">
-        <button onclick="uploadImage()">Upload New Face</button>
-        <p id="uploadStatus"></p>
+    <div class="controls">
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <button onclick="document.getElementById('fileInput').click()">Select Face</button>
+        <button onclick="uploadImage()">Upload</button>
+        <button onclick="stopServer()" style="background-color: #ff4444; color: white;">Stop Server</button>
+        <span id="fpsDisplay" style="margin-left: 20px; font-weight: bold; color: #00ffcc; min-width: 80px;">FPS:
+            0</span>
+        <span id="uploadStatus" style="font-size: 0.9em; margin-left:10px; color:#aaa"></span>
     </div>
 
     <div class="status">
-        <p>System Active • Real-time Monitoring</p>
+        <p>System Active • Real-time Monitoring • <span id="clockDisplay"></span></p>
     </div>
 
     <script>
+        // Performance Monitoring (Testing Only)
+        let frameCount = 0;
+        let lastFPSUpdate = performance.now();
+        const videoFeedImg = document.querySelector('img[alt="Video Feed"]');
+
+        function measureFPS() {
+            // Only count if video stream is effectively 'active' (has actual image data)
+            if (videoFeedImg && videoFeedImg.complete && videoFeedImg.naturalWidth > 1) {
+                frameCount++;
+            }
+
+            const now = performance.now();
+            if (now - lastFPSUpdate >= 1000) {
+                const meter = document.getElementById('fpsDisplay');
+                if (meter) meter.innerText = `FPS: ${frameCount}`;
+                frameCount = 0;
+                lastFPSUpdate = now;
+            }
+            requestAnimationFrame(measureFPS);
+        }
+        measureFPS();
+
+        setInterval(() => {
+            const clock = document.getElementById('clockDisplay');
+            if (clock) clock.innerText = new Date().toLocaleTimeString();
+        }, 1000);
         async function uploadImage() {
             const fileInput = document.getElementById('fileInput');
             const status = document.getElementById('uploadStatus');
@@ -96,6 +161,18 @@
                 console.error('Error:', error);
                 status.textContent = "Upload failed.";
                 status.style.color = "red";
+            }
+        }
+
+        async function stopServer() {
+            if (!confirm("Are you sure you want to stop the server?")) return;
+
+            try {
+                await fetch('/shutdown', { method: 'POST' });
+                alert("Server Service Stopped. You can close this tab.");
+                document.body.innerHTML = "<h1 style='color:white;text-align:center;margin-top:20%'>Server Stopped</h1>";
+            } catch (e) {
+                console.error(e);
             }
         }
     </script>

@@ -7,12 +7,10 @@ from .services.camera import CameraService
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    video_path = "video.mp4"
-    src = video_path if os.path.exists(video_path) else 0
-    
-    print(f"Starting CameraService with source: {src}")
+    print(f"Starting Application...")
     service = CameraService()
-    service.start(src)
+    # service.start() is now lazy-loaded in video.py
+    # to prevent camera access until frontend is opened.
     
     yield
     

@@ -87,7 +87,7 @@ await fetch('/upload-identity', {
 ---
 
 ## 🔧 Configuration
-- **Camera Source**: Defaults to Webcam (`0`). To use a file, place `video.mp4` in the root directory.
+- **Camera Source**: Defaults to Webcam (`0`).
 - **Models**:
     - **Face**: Uses `face_recognition` (dlib).
     - **Gaze**: Uses MediaPipe `face_landmarker.task` located in `app/assets/`.

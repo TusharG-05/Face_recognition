@@ -6,8 +6,12 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-def gaze_worker(frame_queue, result_queue, max_faces, model_path):
-    # Initialize MediaPipe FaceLandmarker
+def gaze_worker(frame_queue: multiprocessing.Queue, result_queue: multiprocessing.Queue, max_faces: int, model_path: str):
+    """
+    Processes video frames using MediaPipe FaceLandmarker.
+    Calculates eye ratios to determine gaze direction and blink state.
+    """
+    # Setup MediaPipe
     base_options = python.BaseOptions(model_asset_path=model_path)
     options = vision.FaceLandmarkerOptions(
         base_options=base_options,
@@ -21,125 +25,118 @@ def gaze_worker(frame_queue, result_queue, max_faces, model_path):
     
     landmarker = vision.FaceLandmarker.create_from_options(options)
     
-    blink_start_time = None
+    # State tracking for grace period
+    suspicious_start_time = None
+    SUSPICION_THRESHOLD = 1.5  # Seconds before flagging "Looking Down"
+    
+    
+    # Thresholds (Tuned based on user feedback)
+    # Right gaze ratio is usually lower (towards 0.0), Left is higher (towards 1.0)
+    # User reported Right was less sensitive -> WE NEED TO RAISE THE MIN THRESHOLD slightly
+    # so it triggers "Right" sooner.
+    # New: 0.45 (was 0.42) - Triggers "Right" easier
+    # New: 0.58 (unchanged) - Keeps "Left" sensitivity
+    H_MIN, H_MAX = 0.45, 0.58
+    V_MIN, V_MAX = 0.38, 0.62 
     
     while True:
         try:
-            # Wait for frame
-            try:
-                frame_data = frame_queue.get(timeout=1)
-            except:
-                continue
+            bgr_frame = frame_queue.get(timeout=1)
+        except:
+            continue
             
-            if frame_data is None: # Sentinel
-                break
-                
-            rgb_frame = frame_data
-            # Convert to MediaPipe Image format
+        if bgr_frame is None: 
+            break
+            
+        try:
+            # Convert to RGB inside the worker
+            rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+            rgb_frame.flags.writeable = False # Efficiency
+            
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            results = landmarker.detect(mp_image)
             
-            try:
-                # Perform Inference
-                results = landmarker.detect(mp_image)
+            final_status = "No Face" # Default
+            
+            if results.face_landmarks:
+                num_faces = len(results.face_landmarks)
                 
-                status_message = "No Face Detected"
-                
-                if results.face_landmarks:
-                    num_faces = len(results.face_landmarks)
+                if num_faces > max_faces:
+                    final_status = f"Multiple Faces ({num_faces})"
+                else:
+                    face_landmarks = results.face_landmarks[0]
+                    h, w, _ = rgb_frame.shape
+
+                    # Helper to map normalized points to pixels
+                    def to_px(landmark):
+                        return np.array([int(landmark.x * w), int(landmark.y * h)])
+
+                    # Extract key points for eye analysis
+                    mesh = [to_px(l) for l in face_landmarks]
                     
-                    if num_faces > max_faces:
-                        status_message = f"ERROR: Too many faces ({num_faces} > {max_faces})"
-                    else:
-                        face_landmarks = results.face_landmarks[0]
-                        
-                        # Convert normalized landmarks [0,1] to pixel coordinates
-                        h, w, _ = rgb_frame.shape
-                        mesh_points = np.array([[int(l.x * w), int(l.y * h)] for l in face_landmarks])
-                        
-                        # Indices from MediaPipe Face Mesh Canonical Model
-                        # P33: Left Eye Inside, P133: Left Eye Outside, P468: Left Iris Center
-                        # P362: Right Eye Inside, P263: Right Eye Outside, P473: Right Iris Center
-                        
-                        def get_ratio(p1, p2, iris_center):
-                            """Calculates where the iris is between two eye corners (0.0 to 1.0)"""
-                            full_dist = np.linalg.norm(p2 - p1)
-                            if full_dist == 0: return 0.5
-                            dist_to_p1 = np.linalg.norm(iris_center - p1)
-                            return dist_to_p1 / full_dist
+                    if len(mesh) > 473:
+                        # Helper for Iris Ratio (0.0=Left, 0.5=Center, 1.0=Right)
+                        def get_iris_position(p1, p2, iris):
+                            total = np.linalg.norm(p2 - p1)
+                            if total == 0: return 0.5
+                            return np.linalg.norm(iris - p1) / total
 
-                        if len(mesh_points) > 473:
-                            # --- HORIZONTAL GAZE ANALYSIS ---
-                            p33, p133, p468 = mesh_points[33], mesh_points[133], mesh_points[468]
-                            ratio_left_h = get_ratio(p33, p133, p468)
-                            p362, p263, p473 = mesh_points[362], mesh_points[263], mesh_points[473]
-                            ratio_right_h = get_ratio(p362, p263, p473)
-                            avg_ratio_h = (ratio_left_h + ratio_right_h) / 2
-                            
-                            # --- VERTICAL GAZE ANALYSIS ---
-                            p159, p145, p468_v = mesh_points[159], mesh_points[145], mesh_points[468]
-                            dist_eye_v = np.linalg.norm(p159 - p145)
-                            
-                            ratio_left_v = get_ratio(p159, p145, p468_v)
-                            p386, p374, p473_v = mesh_points[386], mesh_points[374], mesh_points[473]
-                            ratio_right_v = get_ratio(p386, p374, p473_v)
-                            avg_ratio_v = (ratio_left_v + ratio_right_v) / 2
-                            
-                            # --- THRESHOLDS ---
-                            # Tuned for standard webcam distance ~50cm
-                            SAFE_H_MIN, SAFE_H_MAX = 0.42, 0.58
-                            SAFE_V_MIN, SAFE_V_MAX = 0.38, 0.62 
-                            
-                            is_blinking = dist_eye_v < (h * 0.012) # Blinking threshold
+                        # -- Horizontal --
+                        r_left_h = get_iris_position(mesh[33], mesh[133], mesh[468])
+                        r_right_h = get_iris_position(mesh[362], mesh[263], mesh[473])
+                        avg_h = (r_left_h + r_right_h) / 2
+                        
+                        # -- Vertical --
+                        r_left_v = get_iris_position(mesh[159], mesh[145], mesh[468])
+                        r_right_v = get_iris_position(mesh[386], mesh[374], mesh[473])
+                        avg_v = (r_left_v + r_right_v) / 2
+                        
+                        # -- Blink Detection --
+                        eye_height = np.linalg.norm(mesh[159] - mesh[145])
+                        is_blinking = eye_height < (h * 0.012)
 
-                            # LOGIC FLOW REORDERED
-                            # 1. Check Explicit Gaze Direction (Pupils)
-                            if avg_ratio_h < SAFE_H_MIN:
-                                status_message = "WARNING: Looking Away (Right)"
-                                blink_start_time = None
-                            elif avg_ratio_h > SAFE_H_MAX:
-                                status_message = "WARNING: Looking Away (Left)"
-                                blink_start_time = None
-                            elif avg_ratio_v < SAFE_V_MIN:
-                                status_message = "WARNING: Looking Away (Up)"
-                                blink_start_time = None
-                            elif avg_ratio_v > SAFE_V_MAX:
-                                status_message = "WARNING: Looking Away (Down)"
-                                blink_start_time = None
-                                
-                            # 2. Check Blink / Closed Eyes (Timer Based)
-                            elif is_blinking:
-                                if blink_start_time is None:
-                                    blink_start_time = time.time()
-                                
-                                # Check duration
-                                elapsed = time.time() - blink_start_time
-                                if elapsed > 1.0:
-                                    # User closed eyes for > 1 sec -> Consider as Looking Down / Sleeping
-                                    status_message = "WARNING: Looking Away (Down)"
-                                else:
-                                    # Quick blink
-                                    status_message = "Safe: Center (Blink)"
+                        # --- DECISION LOGIC ---
+                        # We separate "Immediate Warnings" (Left/Right/Up) from "Buffered Warnings" (Down/Blink)
+                        
+                        raw_state = "Center"
+                        
+                        if avg_h < H_MIN: raw_state = "Right"
+                        elif avg_h > H_MAX: raw_state = "Left"
+                        elif avg_v < V_MIN: raw_state = "Up"
+                        elif avg_v > V_MAX: raw_state = "Down"
+                        elif is_blinking:   raw_state = "Blink"
+                        
+                        # Process Grace Period
+                        if raw_state in ["Down", "Blink"]:
+                            # Potential suspicious activity (looking down or sleeping)
+                            if suspicious_start_time is None:
+                                suspicious_start_time = time.time()
                             
+                            elapsed = time.time() - suspicious_start_time
+                            
+                            if elapsed > SUSPICION_THRESHOLD:
+                                final_status = "WARNING: Looking Down/Sleeping"
                             else:
-                                # Safe Center, Eyes Open
-                                status_message = "Safe: Center"
-                                blink_start_time = None
+                                # Within safe buffer time
+                                final_status = "Safe: Center (Blinking/Glance)"
+                                
+                        elif raw_state in ["Left", "Right", "Up"]:
+                            # Immediate Warnings for other directions
+                            final_status = f"WARNING: Looking {raw_state}"
+                            suspicious_start_time = None
+                            
                         else:
-                            status_message = "Face Mesh Limited"
+                            # Safe Center
+                            final_status = "Safe: Center"
+                            suspicious_start_time = None
+                            
+            if result_queue.full():
+                try: result_queue.get_nowait()
+                except: pass
+            result_queue.put(final_status)
 
-                # Helper: Clear queue if full to always provide latest status
-                if result_queue.full():
-                    try:
-                        result_queue.get_nowait()
-                    except:
-                        pass
-                result_queue.put(status_message)
-
-            except Exception as e:
-                print(f"Gaze Worker Error: {e}")
-                
         except Exception as e:
-            print(f"Gaze Worker Error: {e}")
+            print(f"GazeWorker Logic Error: {e}")
 
     landmarker.close()
 
@@ -163,21 +160,15 @@ class GazeDetector:
         print("Gaze Worker started.")
         
     def process_frame(self, frame_bgr):
-            # MediaPipe expects RGB
         try:
-            # print("Gaze: Processing frame...") # Verbose debug
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frame_rgb.flags.writeable = False
-            
-            # Non-blocking put
+            # Send BGR directly; worker will convert to RGB
             if not self.frame_queue.full():
-                self.frame_queue.put(frame_rgb)
+                self.frame_queue.put(frame_bgr)
                 
-            # Non-blocking get
             try:
                 return self.result_queue.get_nowait()
             except:
-                return None # Return None if no NEW result available
+                return None
         except Exception as e:
             print(f"Gaze API Error: {e}")
             return None
