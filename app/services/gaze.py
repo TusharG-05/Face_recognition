@@ -78,7 +78,7 @@ def gaze_worker(frame_queue: multiprocessing.Queue, result_queue: multiprocessin
                         # Helper for Iris Ratio (0.0=Left, 0.5=Center, 1.0=Right)
                         def get_iris_position(p1, p2, iris):
                             total = np.linalg.norm(p2 - p1)
-                            if total == 0: return 0.5
+                            if total <= 1e-6: return 0.5 # Avoid division by zero with small epsilon
                             return np.linalg.norm(iris - p1) / total
 
                         # -- Horizontal --

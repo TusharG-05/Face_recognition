@@ -106,7 +106,7 @@ class CameraService:
 
             # 1. Detection
             now = time.time()
-            if self.face_detector and (now - last_face_time) > 0.33: # 3 FPS
+            if self.face_detector and (now - last_face_time) > 0.033: # 30 FPS (Zero-Lag)
                 last_face_time = now
                 # Pass BGR; worker will convert to RGB
                 f_res = self.face_detector.process_frame(frame)

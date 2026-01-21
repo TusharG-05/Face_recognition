@@ -3,12 +3,12 @@ import time
 import numpy as np
 import multiprocessing
 import os
-import face_recognition
+import threading
+from deepface import DeepFace
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-import threading
 
 def face_recognition_worker(frame_queue, result_queue, known_encoding):
     """
@@ -35,6 +35,12 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
     detector = vision.FaceLandmarker.create_from_options(options)
 
     def recognition_loop():
+        # Pre-warm DeepFace model
+        try:
+            DeepFace.build_model("ArcFace")
+        except:
+            pass
+
         while True:
             time.sleep(0.01)
             with state['lock']:
@@ -43,18 +49,41 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
             
             if img_copy is not None and locs_copy:
                 try:
-                    # Slow encoding happens here
-                    encs = face_recognition.face_encodings(img_copy, locs_copy, num_jitters=0)
-                    if encs and known_encoding is not None:
-                        dists = face_recognition.face_distance(encs, known_encoding)
-                        match = any(d <= 0.52 for d in dists)
-                        conf = float(min(dists))
+                    # Slow recognition happens in background thread
+                    # Convert MediaPipe locs (top, right, bottom, left) to DeepFace bboxes if needed
+                    # DeepFace represent can take a list of alignments or full image.
+                    # For accuracy in 2026, we use ArcFace.
+                    matches = []
+                    for (t, r, b, l) in locs_copy:
+                        # Crop face for better accuracy or pass full image with enforce_detection=False
+                        face_img = img_copy[max(0, t):b, max(0, l):r]
+                        if face_img.size == 0: continue
+                        
+                        # DeepFace.represent returns a list of dictionaries
+                        objs = DeepFace.represent(
+                            img_path=face_img, 
+                            model_name="ArcFace", 
+                            enforce_detection=False,
+                            detector_backend="skip"
+                        )
+                        
+                        if objs and known_encoding is not None:
+                            # known_encoding should be a list/array of floats
+                            # Distance calculation
+                            embedding = np.array(objs[0]["embedding"])
+                            dist = np.linalg.norm(embedding - known_encoding) # L2 distance for ArcFace
+                            matches.append(dist)
+
+                    if matches:
+                        min_dist = min(matches)
+                        match = min_dist <= 0.68 # ArcFace L2 threshold (approx)
                         with state['lock']:
                             state['match'] = match
-                            state['conf'] = conf
-                except:
+                            state['conf'] = float(min_dist)
+                except Exception as e:
+                    # print(f"Recognition Thread Error: {e}")
                     pass
-            time.sleep(0.5) # Throttle recognition thread
+            time.sleep(0.3) # Throttle recognition thread for efficiency
 
     recog_thread = threading.Thread(target=recognition_loop, daemon=True)
     recog_thread.start()
@@ -87,34 +116,21 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
             # Perform face detection with MediaPipe
             detection_result = detector.detect(mp_image)
             
+            ih, iw = img.shape[:2]
             new_locs = []
             if detection_result.face_landmarks:
-                for face_landmark in detection_result.face_landmarks:
+                for landmarks in detection_result.face_landmarks:
                     # MediaPipe landmarks are normalized [0,1]. Convert to pixel coordinates.
-                    # For face_recognition.face_encodings, we need (top, right, bottom, left)
-                    # MediaPipe provides bounding box in detection_result.detections[i].bounding_box
-                    # However, face_recognition.face_encodings expects locations in the format
-                    # (top, right, bottom, left) which is typically derived from a face detector.
-                    # Let's use the bounding box from MediaPipe for consistency.
+                    # Calculate bounding box from landmarks
+                    xs = [lm.x for lm in landmarks]
+                    ys = [lm.y for lm in landmarks]
                     
-                    # Note: MediaPipe's bounding box is (origin_x, origin_y, width, height)
-                    # We need (top, right, bottom, left)
+                    # Pixels (MediaPipe uses normalized 0-1)
+                    t, l, b, r = int(min(ys) * ih), int(min(xs) * iw), int(max(ys) * ih), int(max(xs) * iw)
                     
-                    # If we want to use face_recognition.face_encodings, we need to provide
-                    # the bounding box in its expected format.
-                    # Let's extract bounding boxes from MediaPipe detections.
-                    for detection in detection_result.detections:
-                        bbox = detection.bounding_box
-                        x_min = bbox.origin_x
-                        y_min = bbox.origin_y
-                        width = bbox.width
-                        height = bbox.height
-                        
-                        top = y_min
-                        right = x_min + width
-                        bottom = y_min + height
-                        left = x_min
-                        new_locs.append((top, right, bottom, left))
+                    # Add padding for better recognition accuracy
+                    hp, wp = int((b-t)*0.1), int((r-l)*0.1)
+                    new_locs.append((max(0, t-hp), min(iw, r+wp), min(ih, b+hp), max(0, l-wp)))
 
             with state['lock']:
                 state['img'] = img
@@ -131,12 +147,18 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
 
 class FaceDetector:
     def __init__(self, known_person_path="known_person.jpg"):
-        print("Starting Zero-Lag Face Service...")
+        print("Starting Zero-Lag Modernized Face Service (2026)...")
         try:
-            known_image = face_recognition.load_image_file(known_person_path)
-            encs = face_recognition.face_encodings(known_image)
-            self.known_encoding = encs[0] if encs else None
-        except:
+            # Generate encoding for known person using DeepFace
+            objs = DeepFace.represent(
+                img_path=known_person_path, 
+                model_name="ArcFace", 
+                enforce_detection=True,
+                detector_backend="opencv"
+            )
+            self.known_encoding = np.array(objs[0]["embedding"]) if objs else None
+        except Exception as e:
+            print(f"Known Person Load Error: {e}")
             self.known_encoding = None
 
         self.frame_queue = multiprocessing.Queue(maxsize=1)
