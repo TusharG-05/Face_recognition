@@ -55,28 +55,34 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
                     # For accuracy in 2026, we use ArcFace.
                     matches = []
                     for (t, r, b, l) in locs_copy:
-                        # Crop face for better accuracy or pass full image with enforce_detection=False
-                        face_img = img_copy[max(0, t):b, max(0, l):r]
-                        if face_img.size == 0: continue
+                        # Crop face
+                        face_img_rgb = img_copy[max(0, t):b, max(0, l):r]
+                        if face_img_rgb.size == 0: continue
                         
-                        # DeepFace.represent returns a list of dictionaries
+                        # DeepFace expectation: BGR for numpy arrays
+                        face_img_bgr = cv2.cvtColor(face_img_rgb, cv2.COLOR_RGB2BGR)
+                        
                         objs = DeepFace.represent(
-                            img_path=face_img, 
+                            img_path=face_img_bgr, 
                             model_name="ArcFace", 
                             enforce_detection=False,
-                            detector_backend="skip"
+                            detector_backend="skip",
+                            align=True # Standard ArcFace alignment
                         )
                         
                         if objs and known_encoding is not None:
-                            # known_encoding should be a list/array of floats
-                            # Distance calculation
                             embedding = np.array(objs[0]["embedding"])
-                            dist = np.linalg.norm(embedding - known_encoding) # L2 distance for ArcFace
+                            # Manual Cosine Distance: 1 - (A.B / (|A||B|))
+                            dot = np.dot(embedding, known_encoding)
+                            norm_a = np.linalg.norm(embedding)
+                            norm_b = np.linalg.norm(known_encoding)
+                            dist = 1 - (dot / (norm_a * norm_b))
                             matches.append(dist)
 
                     if matches:
                         min_dist = min(matches)
-                        match = min_dist <= 0.68 # ArcFace L2 threshold (approx)
+                        # ArcFace Cosine threshold is typically around 0.4 for high security
+                        match = min_dist <= 0.45 
                         with state['lock']:
                             state['match'] = match
                             state['conf'] = float(min_dist)
