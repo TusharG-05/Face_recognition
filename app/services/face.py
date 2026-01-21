@@ -61,28 +61,71 @@ def face_recognition_worker(frame_queue, result_queue, known_encoding):
 
     while True:
         try:
-            img = frame_queue.get(timeout=1)
-            if img is None: break
+            # Wait for 1 second max so we can check for exit signals
+            frame_bgr = frame_queue.get(timeout=1)
+        except:
+            continue
+
+        if frame_bgr is None: # Sentinel value to stop
+            break
+
+        try:
+            # Convert to RGB inside the worker process
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             
-            ih, iw = img.shape[:2]
+            # Scale frame for speed
+            h, w = frame_rgb.shape[:2]
+            target_h = 540
+            s = target_h / h if h > target_h else 1.0
+            
+            # Resize if needed
+            img = cv2.resize(frame_rgb, (0,0), fx=s, fy=s) if s < 1.0 else frame_rgb
+            
+            # Convert numpy array to MediaPipe Image
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-            results = detector.detect(mp_image)
+            
+            # Perform face detection with MediaPipe
+            detection_result = detector.detect(mp_image)
             
             new_locs = []
-            if results.face_landmarks:
-                for landmarks in results.face_landmarks:
-                    xs, ys = [lm.x for lm in landmarks], [lm.y for lm in landmarks]
-                    t, l, b, r = int(min(ys)*ih), int(min(xs)*iw), int(max(ys)*ih), int(max(xs)*iw)
-                    hp, wp = int((b-t)*0.1), int((r-l)*0.1)
-                    new_locs.append((max(0, t-hp), min(iw, r+wp), min(ih, b+hp), max(0, l-wp)))
+            if detection_result.face_landmarks:
+                for face_landmark in detection_result.face_landmarks:
+                    # MediaPipe landmarks are normalized [0,1]. Convert to pixel coordinates.
+                    # For face_recognition.face_encodings, we need (top, right, bottom, left)
+                    # MediaPipe provides bounding box in detection_result.detections[i].bounding_box
+                    # However, face_recognition.face_encodings expects locations in the format
+                    # (top, right, bottom, left) which is typically derived from a face detector.
+                    # Let's use the bounding box from MediaPipe for consistency.
+                    
+                    # Note: MediaPipe's bounding box is (origin_x, origin_y, width, height)
+                    # We need (top, right, bottom, left)
+                    
+                    # If we want to use face_recognition.face_encodings, we need to provide
+                    # the bounding box in its expected format.
+                    # Let's extract bounding boxes from MediaPipe detections.
+                    for detection in detection_result.detections:
+                        bbox = detection.bounding_box
+                        x_min = bbox.origin_x
+                        y_min = bbox.origin_y
+                        width = bbox.width
+                        height = bbox.height
+                        
+                        top = y_min
+                        right = x_min + width
+                        bottom = y_min + height
+                        left = x_min
+                        new_locs.append((top, right, bottom, left))
 
             with state['lock']:
                 state['img'] = img
                 state['locs'] = new_locs
                 match_val, conf_val = state['match'], state['conf']
+            
+            # Map back coordinates accurately
+            final_locs = [(int(t/s), int(r/s), int(b/s), int(l/s)) for (t,r,b,l) in new_locs]
 
             if not result_queue.full():
-                result_queue.put((match_val, conf_val, len(new_locs), new_locs))
+                result_queue.put((match_val, conf_val, len(final_locs), final_locs))
         except Exception as e:
             print(f"Face Worker Error: {e}")
 
